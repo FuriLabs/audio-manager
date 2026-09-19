@@ -1,0 +1,3 @@
+*.o
+*.so
+audio-manager-ctl

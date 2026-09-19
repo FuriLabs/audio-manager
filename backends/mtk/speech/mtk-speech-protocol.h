@@ -1,0 +1,223 @@
+/**
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2026 Bardia Moshiri <bardia@furilabs.com>
+ */
+
+#ifndef MTK_SPEECH_PROTOCOL_H
+#define MTK_SPEECH_PROTOCOL_H
+
+#include <glib.h>
+
+#define MTK_CCCI_MAX_BUF_SIZE 3456
+#define MTK_CCCI_MAILBOX_SIZE 16
+#define MTK_CCCI_MAX_AP_PAYLOAD_HEADER_SIZE 6
+#define MTK_CCCI_MAX_MD_PAYLOAD_HEADER_SIZE 10
+#define MTK_CCCI_MAX_AP_PAYLOAD_DATA_SIZE \
+    (MTK_CCCI_MAX_BUF_SIZE - MTK_CCCI_MAILBOX_SIZE - MTK_CCCI_MAX_AP_PAYLOAD_HEADER_SIZE)
+#define MTK_CCCI_MAX_MD_PAYLOAD_DATA_SIZE \
+    (MTK_CCCI_MAX_BUF_SIZE - MTK_CCCI_MAILBOX_SIZE - MTK_CCCI_MAX_MD_PAYLOAD_HEADER_SIZE)
+
+#define MTK_CCCI_MAILBOX_MAGIC 0xffffffffU
+#define MTK_CCCI_AP_PAYLOAD_SYNC 0xa2a2U
+#define MTK_CCCI_MD_PAYLOAD_SYNC 0x1234U
+#define MTK_CCCI_A2M_CHANNEL 5U
+
+/**
+ * AP to modem MediaTek speech message IDs.
+ */
+#define MTK_MSG_A2M_SPH_DL_DIGIT_VOLUME 0x2f00
+#define MTK_MSG_A2M_SPH_UL_DIGIT_VOLUME 0x2f01
+#define MTK_MSG_A2M_MUTE_SPH_UL 0x2f02
+#define MTK_MSG_A2M_MUTE_SPH_DL 0x2f03
+#define MTK_MSG_A2M_MUTE_SPH_UL_SOURCE 0x2f08
+#define MTK_MSG_A2M_MUTE_SPH_DYNAMIC_DL 0x2f0a
+#define MTK_MSG_A2M_SPH_ON 0x2f20
+#define MTK_MSG_A2M_SPH_OFF 0x2f21
+#define MTK_MSG_A2M_SPH_DEV_CHANGE 0x2f2b
+#define MTK_MSG_A2M_PNW_ON 0x2f30
+#define MTK_MSG_A2M_PNW_OFF 0x2f31
+#define MTK_MSG_A2M_VM_REC_ON 0x2f3a
+#define MTK_MSG_A2M_VM_REC_OFF 0x2f3b
+#define MTK_MSG_A2M_RECORD_RAW_PCM_ON 0x2f3c
+#define MTK_MSG_A2M_RECORD_RAW_PCM_OFF 0x2f3d
+#define MTK_MSG_A2M_VOIP_RX_ON 0x2f3e
+#define MTK_MSG_A2M_VOIP_RX_OFF 0x2f3f
+#define MTK_MSG_A2M_BGSND_ON 0x2f43
+#define MTK_MSG_A2M_BGSND_OFF 0x2f44
+#define MTK_MSG_A2M_BGSND_CONFIG 0x2f45
+#define MTK_MSG_A2M_VOIP_RX_CONFIG 0x2f47
+#define MTK_MSG_A2M_TELEPHONY_TX_ON 0x2f48
+#define MTK_MSG_A2M_TELEPHONY_TX_OFF 0x2f49
+#define MTK_MSG_A2M_TELEPHONY_TX_CONFIG 0x2f4a
+#define MTK_MSG_A2M_PNW_DL_DATA_NOTIFY 0x2f50
+#define MTK_MSG_A2M_BGSND_DATA_NOTIFY 0x2f51
+#define MTK_MSG_A2M_VOIP_RX_DL_DATA_NOTIFY 0x2f57
+#define MTK_MSG_A2M_VOIP_RX_UL_DATA_NOTIFY 0x2f58
+#define MTK_MSG_A2M_TELEPHONY_TX_UL_DATA_NOTIFY 0x2f59
+#define MTK_MSG_A2M_PNW_UL_DATA_READ_ACK 0x2f60
+#define MTK_MSG_A2M_VM_REC_DATA_READ_ACK 0x2f64
+#define MTK_MSG_A2M_RAW_PCM_REC_DATA_READ_ACK 0x2f66
+#define MTK_MSG_A2M_NETWORK_STATUS_ACK 0x2f75
+#define MTK_MSG_A2M_EPOF_ACK 0x2f78
+#define MTK_MSG_A2M_DYNAMIC_PAR_IN_STRUCT_SHM 0x2f7b
+#define MTK_MSG_A2M_NW_CODEC_INFO_READ_ACK 0x2f90
+#define MTK_MSG_A2M_MD_ALIVE_ACK_BACK 0x2fa0
+#define MTK_MSG_A2M_IVS_SWITCH 0x2fb0
+#define MTK_MSG_A2M_PSAP_SWITCH 0x2fb1
+#define MTK_MSG_A2M_IVS_SEND 0x2fb2
+#define MTK_MSG_A2M_PSAP_SEND 0x2fb3
+#define MTK_MSG_A2M_ECALL_CTL_SEQ_SWITCH 0x2fb4
+#define MTK_MSG_A2M_ECALL_HANDSHAKE_INFO_READ_ACK 0x2fb5
+#define MTK_MSG_A2M_ECALL_MSD 0x2fb6
+#define MTK_MSG_A2M_ECALL_TX_CTRL_PAR 0x2fb7
+#define MTK_MSG_A2M_ECALL_RX_CTRL_READ_ACK 0x2fb8
+
+/**
+ * Modem to AP notifications and acknowledgements.
+ */
+#define MTK_MSG_M2A_MUTE_SPH_UL_ACK (0x8000 | MTK_MSG_A2M_MUTE_SPH_UL)
+#define MTK_MSG_M2A_MUTE_SPH_DL_ACK (0x8000 | MTK_MSG_A2M_MUTE_SPH_DL)
+#define MTK_MSG_M2A_SPH_ON_ACK (0x8000 | MTK_MSG_A2M_SPH_ON)
+#define MTK_MSG_M2A_SPH_OFF_ACK (0x8000 | MTK_MSG_A2M_SPH_OFF)
+#define MTK_MSG_M2A_SPH_DEV_CHANGE_ACK (0x8000 | MTK_MSG_A2M_SPH_DEV_CHANGE)
+#define MTK_MSG_M2A_PNW_ON_ACK (0x8000 | MTK_MSG_A2M_PNW_ON)
+#define MTK_MSG_M2A_PNW_OFF_ACK (0x8000 | MTK_MSG_A2M_PNW_OFF)
+#define MTK_MSG_M2A_VM_REC_ON_ACK (0x8000 | MTK_MSG_A2M_VM_REC_ON)
+#define MTK_MSG_M2A_VM_REC_OFF_ACK (0x8000 | MTK_MSG_A2M_VM_REC_OFF)
+#define MTK_MSG_M2A_RECORD_RAW_PCM_ON_ACK (0x8000 | MTK_MSG_A2M_RECORD_RAW_PCM_ON)
+#define MTK_MSG_M2A_RECORD_RAW_PCM_OFF_ACK (0x8000 | MTK_MSG_A2M_RECORD_RAW_PCM_OFF)
+#define MTK_MSG_M2A_VOIP_RX_ON_ACK (0x8000 | MTK_MSG_A2M_VOIP_RX_ON)
+#define MTK_MSG_M2A_VOIP_RX_OFF_ACK (0x8000 | MTK_MSG_A2M_VOIP_RX_OFF)
+#define MTK_MSG_M2A_BGSND_ON_ACK (0x8000 | MTK_MSG_A2M_BGSND_ON)
+#define MTK_MSG_M2A_BGSND_OFF_ACK (0x8000 | MTK_MSG_A2M_BGSND_OFF)
+#define MTK_MSG_M2A_TELEPHONY_TX_ON_ACK (0x8000 | MTK_MSG_A2M_TELEPHONY_TX_ON)
+#define MTK_MSG_M2A_TELEPHONY_TX_OFF_ACK (0x8000 | MTK_MSG_A2M_TELEPHONY_TX_OFF)
+#define MTK_MSG_M2A_PNW_DL_DATA_REQUEST (0x8000 | MTK_MSG_A2M_PNW_DL_DATA_NOTIFY)
+#define MTK_MSG_M2A_BGSND_DATA_REQUEST (0x8000 | MTK_MSG_A2M_BGSND_DATA_NOTIFY)
+#define MTK_MSG_M2A_VOIP_RX_DL_DATA_REQUEST (0x8000 | MTK_MSG_A2M_VOIP_RX_DL_DATA_NOTIFY)
+#define MTK_MSG_M2A_VOIP_RX_UL_DATA_REQUEST (0x8000 | MTK_MSG_A2M_VOIP_RX_UL_DATA_NOTIFY)
+#define MTK_MSG_M2A_TELEPHONY_TX_UL_DATA_REQUEST (0x8000 | MTK_MSG_A2M_TELEPHONY_TX_UL_DATA_NOTIFY)
+#define MTK_MSG_M2A_PNW_UL_DATA_NOTIFY (0x8000 | MTK_MSG_A2M_PNW_UL_DATA_READ_ACK)
+#define MTK_MSG_M2A_VM_REC_DATA_NOTIFY (0x8000 | MTK_MSG_A2M_VM_REC_DATA_READ_ACK)
+#define MTK_MSG_M2A_RAW_PCM_REC_DATA_NOTIFY (0x8000 | MTK_MSG_A2M_RAW_PCM_REC_DATA_READ_ACK)
+#define MTK_MSG_M2A_DYNAMIC_PAR_IN_STRUCT_SHM_ACK (0x8000 | MTK_MSG_A2M_DYNAMIC_PAR_IN_STRUCT_SHM)
+#define MTK_MSG_M2A_IVS_SWITCH_ACK (0x8000 | MTK_MSG_A2M_IVS_SWITCH)
+#define MTK_MSG_M2A_PSAP_SWITCH_ACK (0x8000 | MTK_MSG_A2M_PSAP_SWITCH)
+#define MTK_MSG_M2A_ECALL_CTL_SEQ_SWITCH_ACK (0x8000 | MTK_MSG_A2M_ECALL_CTL_SEQ_SWITCH)
+#define MTK_MSG_M2A_ECALL_HANDSHAKE_INFO (0x8000 | MTK_MSG_A2M_ECALL_HANDSHAKE_INFO_READ_ACK)
+#define MTK_MSG_M2A_ECALL_MSD_ACK (0x8000 | MTK_MSG_A2M_ECALL_MSD)
+#define MTK_MSG_M2A_ECALL_TX_CTRL_PAR_ACK (0x8000 | MTK_MSG_A2M_ECALL_TX_CTRL_PAR)
+#define MTK_MSG_M2A_ECALL_RX_CTRL_PAR_NOTIFY (0x8000 | MTK_MSG_A2M_ECALL_RX_CTRL_READ_ACK)
+#define MTK_MSG_M2A_EM_DATA_REQUEST (0x8000 | 0x2f70)
+#define MTK_MSG_M2A_NETWORK_STATUS_NOTIFY (0x8000 | MTK_MSG_A2M_NETWORK_STATUS_ACK)
+#define MTK_MSG_M2A_EPOF_NOTIFY (0x8000 | MTK_MSG_A2M_EPOF_ACK)
+#define MTK_MSG_M2A_NW_CODEC_INFO_NOTIFY (0x8000 | MTK_MSG_A2M_NW_CODEC_INFO_READ_ACK)
+#define MTK_MSG_M2A_MD_ALIVE (0x8000 | MTK_MSG_A2M_MD_ALIVE_ACK_BACK)
+
+/**
+ * Shared buffer payload type identifiers used by the modem speech protocol.
+ */
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_VM_TYPE 4
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_PCM_TYPE 5
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_BGS_TYPE 6
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_RAW_PCM_TYPE 18
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_DYNAMIC_PARAM_TYPE 19
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_ECALL_MSD_TYPE 24
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_SPH_INFO 25
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_NW_CODEC_INFO 20
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_MD_ALIVE_INFO 26
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_VOIP_RX 27
+#define MTK_SHARE_BUFF_DATA_TYPE_CCCI_TELEPHONY_TX 28
+
+/**
+ * Values encoded into the 128 byte MtkSphInfo speech information block.
+ */
+#define MTK_SPH_APPLICATION_NORMAL 0
+#define MTK_SPH_BT_OFF 0
+#define MTK_SPH_BT_PCM 1
+#define MTK_SPH_BT_CVSD_MSBC 2
+#define MTK_SPH_BT_CVSD 3
+#define MTK_SPH_BT_MSBC 4
+#define MTK_SPH_BT_BLE 5
+#define MTK_SPH_BT_BLE_L 6
+#define MTK_SPH_BT_BLE_R 7
+#define MTK_SPH_BT_BLE_PCM 8
+#define MTK_SPH_BT_BLE_PCM_L 9
+#define MTK_SPH_BT_BLE_PCM_R 10
+
+#define MTK_SPH_PARAM_VIA_PAYLOAD 0
+#define MTK_SPH_PARAM_VIA_SHM_CCCI 1
+#define MTK_SPH_PARAM_VIA_SHM_USIP 2
+
+#define MTK_SPH_PARAM_INVALID 0
+#define MTK_SPH_PARAM_VALID 1
+#define MTK_SPH_PARAM_PREVIOUS_VALID 2
+
+#define MTK_SPH_EXT_DEV_INFO_DEFAULT 0
+#define MTK_SPH_EXT_DEV_INFO_USB_AUDIO 5
+#define MTK_SPH_EXT_DEV_INFO_EARPHONE 6
+
+#define MTK_SPH_SAMPLE_RATE_08K 0
+#define MTK_SPH_SAMPLE_RATE_16K 1
+#define MTK_SPH_SAMPLE_RATE_32K 2
+#define MTK_SPH_SAMPLE_RATE_48K 3
+
+#define MTK_SPH_ON_MUTE_BIT_UL (1U << 0)
+#define MTK_SPH_ON_MUTE_BIT_DL (1U << 1)
+#define MTK_SPH_ON_MUTE_BIT_UL_SOURCE (1U << 3)
+#define MTK_SPH_ON_MUTE_BIT_DL_DYNAMIC (1U << 5)
+
+/**
+ * speech information structure consumed by the MediaTek modem.
+ *
+ * Field layout and size are part of the AP/modem ABI and must not be changed.
+ */
+typedef struct __attribute__((packed)) {
+    guint8 application;          /**< Speech application ID */
+    guint8 bt_info;              /**< Bluetooth codec selector */
+    guint8 sample_rate_enum;     /**< MTK_SPH_SAMPLE_RATE_* value */
+    guint8 opendsp_flag;         /**< OpenDSP usage flag */
+
+    guint8 sph_param_path;       /**< Parameter delivery path */
+    guint8 sph_param_valid;      /**< Parameter validity state */
+    guint16 sph_param_length;
+    guint16 sph_param_index;
+
+    guint16 ext_dev_info;        /**< External speech device selector */
+
+    guint8 loopback_flag;
+    guint8 loopback_delay;
+
+    guint16 echo_ref_delay_ms;
+    guint8 mic_delay_ms;
+
+    guint8 mute_info;            /**< Initial speech mute bitmask */
+    guint16 enh_dynamic_ctrl;
+    guint32 sph_param_usip_length;
+    guint32 sph_param_usip_index;
+    guint16 drv_common_param[12];
+    guint16 drv_debug_info[16];
+
+    guint8 num_smart_pa;
+    guint8 reserved[43];
+} MtkSphInfo;
+
+/**
+ * Convert a MediaTek speech message ID to a static diagnostic name.
+ */
+const gchar *
+mtk_speech_message_name(guint16 msg_id);
+
+/**
+ * Return TRUE when an AP to modem command requires an acknowledgement.
+ */
+gboolean
+mtk_speech_message_needs_ack(guint16 msg_id);
+
+/**
+ * Return the expected acknowledgement ID for an AP to modem command.
+ */
+guint16
+mtk_speech_message_expected_ack(guint16 msg_id);
+
+#endif /* MTK_SPEECH_PROTOCOL_H */
