@@ -1,0 +1,41 @@
+Source: audio-manager
+Maintainer: Bardia Moshiri <bardia@furilabs.com>
+Section: misc
+Priority: optional
+Build-Depends: debhelper-compat (= 13),
+               gcc,
+               make,
+               pkg-config,
+               libglib2.0-dev,
+               libasound2-dev,
+               libxml2-dev
+Standards-Version: 4.7.0
+Vcs-Browser: https://github.com/furilabs/audio-manager
+Vcs-Git: https://github.com/furilabs/audio-manager.git
+
+Package: libaudio-manager
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: audio-manager
+ An audio management library that abstracts chipset specific audio
+ configuration and routing differences.
+
+Package: libaudio-manager-dev
+Architecture: any
+Depends: ${misc:Depends},
+         libaudio-manager (= ${binary:Version}),
+Description: audio-manager
+ An audio management library that abstracts chipset specific audio
+ configuration and routing differences.
+ .
+ development headers
+
+Package: audio-manager-ctl
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends},
+         libaudio-manager (= ${binary:Version}),
+Description: audio-manager
+ An audio management library that abstracts chipset specific audio
+ configuration and routing differences.
+ .
+ standalone control tool
