@@ -263,7 +263,7 @@ mtk_speech_volume_new(const gchar *audio_param_directory,
         g_clear_error(&optional_error);
     }
 
-    g_debug("MediaTek V2.2 speech gain tables loaded step_per_db=%d volume_step=%d",
+    g_debug("MediaTek speech gain tables loaded step_per_db=%d volume_step=%d",
             volume->step_per_db, volume->volume_step);
     return volume;
 
