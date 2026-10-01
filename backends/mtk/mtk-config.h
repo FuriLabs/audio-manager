@@ -81,6 +81,7 @@ typedef struct {
      */
     gchar *modem_uplink;
     gchar *modem_downlink;
+    gchar *speaker_modem_downlink;
 
     /**
      * MediaTek external speech device IDs.

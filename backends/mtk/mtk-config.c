@@ -222,6 +222,10 @@ mtk_config_load(const gchar *path,
                                                      "Routes",
                                                      "ModemDownlink",
                                                      "MD1_TO_ADDA_DL");
+    config->speaker_modem_downlink = audio_config_get_string(key_file,
+                                                             "Routes",
+                                                             "SpeakerModemDownlink",
+                                                             "MD1_TO_ADDA_DL");
 
     config->receiver_ext_device = get_ext_device(key_file, "Receiver");
     config->speaker_ext_device = get_ext_device(key_file, "Speaker");
@@ -587,6 +591,7 @@ mtk_config_free(MtkConfig *config)
     g_free(config->usb_input);
     g_free(config->modem_uplink);
     g_free(config->modem_downlink);
+    g_free(config->speaker_modem_downlink);
 
     g_free(config->receiver_speech_volume_profile);
     g_free(config->speaker_speech_volume_profile);

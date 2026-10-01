@@ -201,6 +201,18 @@ output_route(AudioManagerBackend *backend,
 }
 
 static const gchar *
+modem_downlink_route(AudioManagerBackend *backend,
+                     AudioManagerOutputDevice device)
+{
+    if (device == AUDIO_MANAGER_OUTPUT_SPEAKER &&
+        backend->config->speaker_modem_downlink != NULL &&
+        *backend->config->speaker_modem_downlink != '\0')
+        return backend->config->speaker_modem_downlink;
+
+    return backend->config->modem_downlink;
+}
+
+static const gchar *
 input_route(AudioManagerBackend *backend,
             AudioManagerInputDevice device)
 {
@@ -335,6 +347,10 @@ set_output_device(AudioManagerBackend *backend,
     AudioManagerOutputDevice old_device;
     const gchar *old_route;
     const gchar *new_route;
+    const gchar *old_modem_downlink;
+    const gchar *new_modem_downlink;
+    gboolean active_hostless;
+    gboolean modem_downlink_changed;
     gint ret;
 
     if (backend->output_device == device)
@@ -346,8 +362,9 @@ set_output_device(AudioManagerBackend *backend,
      * path. Don't allow this setter to move only the output into or out of Bluetooth
      * while speech is active.
      */
-    if (mtk_speech_is_active(backend->speech) &&
-        backend->call_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
+    active_hostless = mtk_speech_is_active(backend->speech) &&
+                      backend->call_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS;
+    if (active_hostless &&
         ((backend->output_device == AUDIO_MANAGER_OUTPUT_BLUETOOTH) !=
          (device == AUDIO_MANAGER_OUTPUT_BLUETOOTH)))
         return -ENOTSUP;
@@ -355,20 +372,36 @@ set_output_device(AudioManagerBackend *backend,
     old_device = backend->output_device;
     old_route = output_route(backend, old_device);
     new_route = output_route(backend, device);
+    old_modem_downlink = modem_downlink_route(backend, old_device);
+    new_modem_downlink = modem_downlink_route(backend, device);
+    modem_downlink_changed = g_strcmp0(old_modem_downlink, new_modem_downlink) != 0;
 
     if (device != AUDIO_MANAGER_OUTPUT_NONE && new_route == NULL &&
         device != AUDIO_MANAGER_OUTPUT_BLUETOOTH)
         return -ENOTSUP;
 
+    if (active_hostless &&
+        device != AUDIO_MANAGER_OUTPUT_BLUETOOTH &&
+        modem_downlink_changed) {
+        ret = apply_route(backend, new_modem_downlink, TRUE);
+        if (ret < 0)
+            return ret;
+        ret = apply_route(backend, old_modem_downlink, FALSE);
+        if (ret < 0) {
+            apply_route(backend, new_modem_downlink, FALSE);
+            return ret;
+        }
+    }
+
     if (g_strcmp0(old_route, new_route) != 0) {
         ret = apply_route(backend, old_route, FALSE);
         if (ret < 0 && ret != -ENOENT)
-            return ret;
+            goto rollback_downlink;
 
         ret = apply_route(backend, new_route, TRUE);
         if (ret < 0) {
             apply_route(backend, old_route, TRUE);
-            return ret;
+            goto rollback_downlink;
         }
     }
 
@@ -377,8 +410,7 @@ set_output_device(AudioManagerBackend *backend,
     if (device == AUDIO_MANAGER_OUTPUT_SPEAKER)
         mtk_smartpa_log_state(backend->config, backend->card);
 
-    if (mtk_speech_is_active(backend->speech) &&
-        backend->call_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS) {
+    if (active_hostless) {
         ret = mtk_speech_device_change(backend->speech,
                                        device,
                                        backend->input_device);
@@ -388,7 +420,7 @@ set_output_device(AudioManagerBackend *backend,
                 apply_route(backend, old_route, TRUE);
             }
             backend->output_device = old_device;
-            return ret;
+            goto rollback_downlink;
         }
 
         ret = mtk_backend_call_set_volume(backend,
@@ -400,6 +432,15 @@ set_output_device(AudioManagerBackend *backend,
 
     refresh_media_output_gain(backend);
     return 0;
+
+rollback_downlink:
+    if (active_hostless &&
+        device != AUDIO_MANAGER_OUTPUT_BLUETOOTH &&
+        modem_downlink_changed) {
+        apply_route(backend, new_modem_downlink, FALSE);
+        apply_route(backend, old_modem_downlink, TRUE);
+    }
+    return ret;
 }
 
 static gint
@@ -478,12 +519,16 @@ set_devices(AudioManagerBackend *backend,
     const gchar *old_input_route;
     const gchar *new_output_route;
     const gchar *new_input_route;
+    const gchar *old_modem_downlink;
+    const gchar *new_modem_downlink;
     gboolean active_hostless;
     gboolean old_bt;
     gboolean new_bt;
     gboolean output_route_changed;
     gboolean input_route_changed;
+    gboolean modem_downlink_changed;
     gboolean enabled_direct_routes = FALSE;
+    gboolean switched_direct_route = FALSE;
     gint ret;
 
     if (backend == NULL)
@@ -521,8 +566,11 @@ set_devices(AudioManagerBackend *backend,
     old_input = backend->input_device;
     old_output_route = output_route(backend, old_output);
     old_input_route = input_route(backend, old_input);
+    old_modem_downlink = modem_downlink_route(backend, old_output);
+    new_modem_downlink = modem_downlink_route(backend, output);
     output_route_changed = g_strcmp0(old_output_route, new_output_route) != 0;
     input_route_changed = g_strcmp0(old_input_route, new_input_route) != 0;
+    modem_downlink_changed = g_strcmp0(old_modem_downlink, new_modem_downlink) != 0;
 
     /*
      * Local call audio:
@@ -533,9 +581,7 @@ set_devices(AudioManagerBackend *backend,
      *          |
      *       MTK AFE
      *          |
-     *         ADDA
-     *          |
-     *        codec
+     *      output path
      *          |
      *   +------+------+------+
      *   |             |      |
@@ -559,12 +605,23 @@ set_devices(AudioManagerBackend *backend,
         ret = apply_route(backend, backend->config->modem_uplink, TRUE);
         if (ret < 0)
             return ret;
-        ret = apply_route(backend, backend->config->modem_downlink, TRUE);
+        ret = apply_route(backend, new_modem_downlink, TRUE);
         if (ret < 0) {
             apply_route(backend, backend->config->modem_uplink, FALSE);
             return ret;
         }
         enabled_direct_routes = TRUE;
+    } else if (active_hostless && !old_bt && !new_bt &&
+               modem_downlink_changed) {
+        ret = apply_route(backend, new_modem_downlink, TRUE);
+        if (ret < 0)
+            return ret;
+        ret = apply_route(backend, old_modem_downlink, FALSE);
+        if (ret < 0) {
+            apply_route(backend, new_modem_downlink, FALSE);
+            return ret;
+        }
+        switched_direct_route = TRUE;
     }
 
     if (input_route_changed) {
@@ -618,7 +675,7 @@ set_devices(AudioManagerBackend *backend,
             goto rollback_direct;
         }
         if (!old_bt && new_bt) {
-            apply_route(backend, backend->config->modem_downlink, FALSE);
+            apply_route(backend, old_modem_downlink, FALSE);
             apply_route(backend, backend->config->modem_uplink, FALSE);
         }
         ret = mtk_backend_call_set_volume(backend, backend->call_volume);
@@ -634,8 +691,12 @@ set_devices(AudioManagerBackend *backend,
     return 0;
 
 rollback_direct:
+    if (switched_direct_route) {
+        apply_route(backend, new_modem_downlink, FALSE);
+        apply_route(backend, old_modem_downlink, TRUE);
+    }
     if (enabled_direct_routes) {
-        apply_route(backend, backend->config->modem_downlink, FALSE);
+        apply_route(backend, new_modem_downlink, FALSE);
         apply_route(backend, backend->config->modem_uplink, FALSE);
     }
     return ret;
@@ -1000,14 +1061,14 @@ mtk_backend_recover_speech(MtkSpeech *speech,
 
     if (backend->call_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
         backend->output_device != AUDIO_MANAGER_OUTPUT_BLUETOOTH) {
-        apply_route(backend, backend->config->modem_downlink, FALSE);
+        apply_route(backend, modem_downlink_route(backend, backend->output_device), FALSE);
         apply_route(backend, backend->config->modem_uplink, FALSE);
 
         ret = apply_route(backend, backend->config->modem_uplink, TRUE);
         if (ret < 0)
             return ret;
 
-        ret = apply_route(backend, backend->config->modem_downlink, TRUE);
+        ret = apply_route(backend, modem_downlink_route(backend, backend->output_device), TRUE);
         if (ret < 0) {
             apply_route(backend, backend->config->modem_uplink, FALSE);
             return ret;
@@ -1027,7 +1088,7 @@ mtk_backend_recover_speech(MtkSpeech *speech,
     if (ret < 0) {
         if (backend->call_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
             backend->output_device != AUDIO_MANAGER_OUTPUT_BLUETOOTH) {
-            apply_route(backend, backend->config->modem_downlink, FALSE);
+            apply_route(backend, modem_downlink_route(backend, backend->output_device), FALSE);
             apply_route(backend, backend->config->modem_uplink, FALSE);
         }
         return ret;
@@ -1948,7 +2009,7 @@ mtk_backend_call_start(AudioManagerBackend *backend,
             if (ret < 0)
                 return ret;
 
-            ret = apply_route(backend, backend->config->modem_downlink, TRUE);
+            ret = apply_route(backend, modem_downlink_route(backend, backend->output_device), TRUE);
             if (ret < 0) {
                 apply_route(backend, backend->config->modem_uplink, FALSE);
                 return ret;
@@ -1969,7 +2030,7 @@ mtk_backend_call_start(AudioManagerBackend *backend,
     if (ret < 0) {
         if (transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
             backend->output_device != AUDIO_MANAGER_OUTPUT_BLUETOOTH) {
-            apply_route(backend, backend->config->modem_downlink, FALSE);
+            apply_route(backend, modem_downlink_route(backend, backend->output_device), FALSE);
             apply_route(backend, backend->config->modem_uplink, FALSE);
         }
         return ret;
@@ -1993,7 +2054,7 @@ mtk_backend_call_stop(AudioManagerBackend *backend)
 
     if (backend->call_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
         backend->output_device != AUDIO_MANAGER_OUTPUT_BLUETOOTH) {
-        tmp = apply_route(backend, backend->config->modem_downlink, FALSE);
+        tmp = apply_route(backend, modem_downlink_route(backend, backend->output_device), FALSE);
         if (tmp < 0 && ret == 0)
             ret = tmp;
 
@@ -2018,8 +2079,12 @@ mtk_backend_call_set_route(AudioManagerBackend *backend,
     const gchar *old_input_route;
     const gchar *new_output_route;
     const gchar *new_input_route;
+    const gchar *old_modem_downlink;
+    const gchar *new_modem_downlink;
     gboolean old_direct;
     gboolean new_direct;
+    gboolean modem_downlink_changed;
+    gboolean switched_direct_route = FALSE;
     gint ret;
 
     if (backend == NULL)
@@ -2041,20 +2106,33 @@ mtk_backend_call_set_route(AudioManagerBackend *backend,
     old_input_route = input_route(backend, old_input);
     new_output_route = output_route(backend, output);
     new_input_route = input_route(backend, input);
+    old_modem_downlink = modem_downlink_route(backend, old_output);
+    new_modem_downlink = modem_downlink_route(backend, output);
     old_direct = old_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
                  old_output != AUDIO_MANAGER_OUTPUT_BLUETOOTH;
     new_direct = transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
                  output != AUDIO_MANAGER_OUTPUT_BLUETOOTH;
+    modem_downlink_changed = g_strcmp0(old_modem_downlink, new_modem_downlink) != 0;
 
     if (new_direct && !old_direct) {
         ret = apply_route(backend, backend->config->modem_uplink, TRUE);
         if (ret < 0)
             return ret;
-        ret = apply_route(backend, backend->config->modem_downlink, TRUE);
+        ret = apply_route(backend, new_modem_downlink, TRUE);
         if (ret < 0) {
             apply_route(backend, backend->config->modem_uplink, FALSE);
             return ret;
         }
+    } else if (old_direct && new_direct && modem_downlink_changed) {
+        ret = apply_route(backend, new_modem_downlink, TRUE);
+        if (ret < 0)
+            return ret;
+        ret = apply_route(backend, old_modem_downlink, FALSE);
+        if (ret < 0) {
+            apply_route(backend, new_modem_downlink, FALSE);
+            return ret;
+        }
+        switched_direct_route = TRUE;
     }
 
     if (g_strcmp0(old_input_route, new_input_route) != 0) {
@@ -2099,7 +2177,7 @@ mtk_backend_call_set_route(AudioManagerBackend *backend,
     backend->call_transport = transport;
 
     if (old_direct && !new_direct) {
-        apply_route(backend, backend->config->modem_downlink, FALSE);
+        apply_route(backend, old_modem_downlink, FALSE);
         apply_route(backend, backend->config->modem_uplink, FALSE);
     }
 
@@ -2120,8 +2198,11 @@ rollback_input:
         apply_route(backend, old_input_route, TRUE);
     }
 rollback_direct:
-    if (new_direct && !old_direct) {
-        apply_route(backend, backend->config->modem_downlink, FALSE);
+    if (switched_direct_route) {
+        apply_route(backend, new_modem_downlink, FALSE);
+        apply_route(backend, old_modem_downlink, TRUE);
+    } else if (new_direct && !old_direct) {
+        apply_route(backend, new_modem_downlink, FALSE);
         apply_route(backend, backend->config->modem_uplink, FALSE);
     }
     return ret;
