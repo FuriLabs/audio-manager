@@ -260,6 +260,7 @@ audio_manager_call_set_route(AudioManager *manager,
                              AudioManagerInputDevice input,
                              AudioManagerCallTransport transport)
 {
+    gint volume_ret;
     gint ret;
 
     if (manager == NULL)
@@ -301,17 +302,17 @@ audio_manager_call_set_route(AudioManager *manager,
     if (ret < 0)
         goto out;
 
-    manager->call_transport = transport;
-    audio_manager_sync_devices(manager);
-
     if (transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
         manager->backend_ops->call_set_volume != NULL) {
-        gint volume_ret = manager->backend_ops->call_set_volume(manager->backend,
-                                                                manager->call_volume);
+        volume_ret = manager->backend_ops->call_set_volume(manager->backend,
+                                                           manager->call_volume);
         if (volume_ret < 0 && volume_ret != -ENOTSUP)
             g_warning("failed to apply call volume after route change: %s",
                       g_strerror(-volume_ret));
     }
+
+    manager->call_transport = transport;
+    audio_manager_sync_devices(manager);
 
 out:
     g_rec_mutex_unlock(&manager->control_lock);
@@ -1210,6 +1211,9 @@ audio_manager_call_stop(AudioManager *manager)
     ret = manager->backend_ops->call_stop(manager->backend);
     if (ret == 0)
         manager->call_active = FALSE;
+    else if (manager->backend_ops->call_get_state != NULL &&
+             manager->backend_ops->call_get_state(manager->backend) == AUDIO_MANAGER_CALL_STATE_IDLE)
+        manager->call_active = FALSE;
 
 out:
     g_rec_mutex_unlock(&manager->control_lock);
@@ -1322,6 +1326,12 @@ audio_manager_call_set_volume(AudioManager *manager,
     }
 
     volume = audio_clamp_volume(volume);
+    if (!manager->call_active) {
+        manager->call_volume = volume;
+        ret = 0;
+        goto out;
+    }
+
     ret = manager->backend_ops->call_set_volume(manager->backend, volume);
     if (ret == 0)
         manager->call_volume = volume;
