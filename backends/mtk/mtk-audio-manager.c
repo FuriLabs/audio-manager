@@ -2279,13 +2279,76 @@ call_volume_profile(AudioManagerBackend *backend)
 }
 
 static gint
+mtk_backend_apply_call_gain(AudioManagerBackend *backend,
+                            const MtkSpeechGain *gain)
+{
+    gsize i;
+    gint ret;
+
+    if (gain->downlink_analog_control != NULL &&
+        !(backend->smart_pa_present &&
+          backend->output_device == AUDIO_MANAGER_OUTPUT_SPEAKER)) {
+        ret = audio_alsa_control_set_index(backend->card,
+                                           gain->downlink_analog_control,
+                                           gain->downlink_analog_index);
+        if (ret < 0)
+            return ret;
+    }
+
+    ret = mtk_speech_set_downlink_gain(backend->speech,
+                                       gain->modem_downlink_gain);
+    if (ret < 0)
+        return ret;
+
+    if (gain->ui_index == 0)
+        return 0;
+
+    if (gain->update_parameter_volume_index) {
+        ret = mtk_speech_set_parameter_volume_index(backend->speech,
+                                                    gain->parameter_volume_index);
+        if (ret < 0)
+            return ret;
+    }
+
+    for (i = 0; i < gain->uplink_pga_count; i++) {
+        if (gain->uplink_pga_control[i] == NULL)
+            continue;
+        ret = audio_alsa_control_set_index(backend->card,
+                                           gain->uplink_pga_control[i],
+                                           gain->uplink_pga_index[i]);
+        if (ret < 0)
+            return ret;
+    }
+
+    ret = mtk_speech_set_uplink_gain(backend->speech,
+                                     gain->modem_uplink_gain);
+    if (ret < 0)
+        return ret;
+
+    ret = audio_alsa_control_set_index(backend->card,
+                                       "Sidetone_Positive_Gain_dB",
+                                       gain->sidetone_positive_gain_db);
+    if (ret < 0 && ret != -ENOENT)
+        return ret;
+
+    ret = audio_alsa_control_set_index(backend->card,
+                                       "Sidetone_Gain",
+                                       gain->sidetone_gain);
+    if (ret < 0 && ret != -ENOENT)
+        return ret;
+
+    return 0;
+}
+
+static gint
 mtk_backend_call_set_volume(AudioManagerBackend *backend,
                             gdouble volume)
 {
+    MtkSpeechGain old_gain;
     MtkSpeechGain gain;
     const gchar *speech_profile;
     const gchar *gain_profile;
-    gsize i;
+    gint rollback_ret;
     gint ret;
 
     if (backend->call_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTFUL)
@@ -2299,64 +2362,27 @@ mtk_backend_call_set_volume(AudioManagerBackend *backend,
     ret = mtk_speech_volume_calculate(backend->speech_volume,
                                       speech_profile,
                                       gain_profile,
+                                      backend->call_volume,
+                                      &old_gain);
+    if (ret < 0)
+        return ret;
+
+    ret = mtk_speech_volume_calculate(backend->speech_volume,
+                                      speech_profile,
+                                      gain_profile,
                                       volume,
                                       &gain);
     if (ret < 0)
         return ret;
 
-    if (gain.downlink_analog_control != NULL &&
-        !(backend->smart_pa_present &&
-          backend->output_device == AUDIO_MANAGER_OUTPUT_SPEAKER)) {
-        ret = audio_alsa_control_set_index(backend->card,
-                                           gain.downlink_analog_control,
-                                           gain.downlink_analog_index);
-        if (ret < 0)
-            return ret;
-    }
-
-    ret = mtk_speech_set_downlink_gain(backend->speech,
-                                       gain.modem_downlink_gain);
-    if (ret < 0)
+    ret = mtk_backend_apply_call_gain(backend, &gain);
+    if (ret < 0) {
+        rollback_ret = mtk_backend_apply_call_gain(backend, &old_gain);
+        if (rollback_ret < 0)
+            g_warning("failed to restore previous MediaTek call gain after update failure: %s",
+                      g_strerror(-rollback_ret));
         return ret;
-
-    if (gain.ui_index == 0) {
-        backend->call_volume = volume;
-        return 0;
     }
-
-    if (gain.update_parameter_volume_index) {
-        ret = mtk_speech_set_parameter_volume_index(backend->speech,
-                                                    gain.parameter_volume_index);
-        if (ret < 0)
-            return ret;
-    }
-
-    for (i = 0; i < gain.uplink_pga_count; i++) {
-        if (gain.uplink_pga_control[i] == NULL)
-            continue;
-        ret = audio_alsa_control_set_index(backend->card,
-                                           gain.uplink_pga_control[i],
-                                           gain.uplink_pga_index[i]);
-        if (ret < 0)
-            return ret;
-    }
-
-    ret = mtk_speech_set_uplink_gain(backend->speech,
-                                     gain.modem_uplink_gain);
-    if (ret < 0)
-        return ret;
-
-    ret = audio_alsa_control_set_index(backend->card,
-                                       "Sidetone_Positive_Gain_dB",
-                                       gain.sidetone_positive_gain_db);
-    if (ret < 0 && ret != -ENOENT)
-        return ret;
-
-    ret = audio_alsa_control_set_index(backend->card,
-                                       "Sidetone_Gain",
-                                       gain.sidetone_gain);
-    if (ret < 0 && ret != -ENOENT)
-        return ret;
 
     backend->call_volume = volume;
     g_debug("MediaTek call gain applied volume=%.3f speech_profile=%s gain_profile=%s ui_index=%u",
