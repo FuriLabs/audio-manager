@@ -15,6 +15,7 @@
 #include "common/alsa/alsa-pcm.h"
 
 #define MTK_SPEECH_ACK_TIMEOUT_MS 60000U
+#define MTK_SPEECH_ROUTING_UNMUTE_MS 150U
 #define MTK_SPEECH_MODEM_MONITOR_MS 2000U
 #define MTK_SPEECH_MODEM_READY_RETRY_MS 20U
 #define MTK_SPEECH_MODEM_READY_TIMEOUT_MS 500U
@@ -51,6 +52,9 @@ struct MtkSpeech {
     gboolean recovery_callback_running;
     gboolean uplink_muted;
     gboolean downlink_muted;
+    gboolean routing_muted;
+    gboolean last_start_failed_pcm;
+    GSource *routing_unmute_source;
     gboolean deferred_device_change;
     gboolean deferred_volume_update;
     gboolean deferred_uplink_mute;
@@ -278,6 +282,84 @@ speech_send_failed(MtkSpeech *speech,
 {
     if (error == -EPIPE || error == -ENODEV || error == -EIO)
         speech_enter_recovery(speech, "CCCI send failure");
+}
+
+static gint
+speech_send_routing_mute_start(MtkSpeech *speech)
+{
+    gint ret;
+
+    if (speech == NULL || speech->ccci == NULL)
+        return -EINVAL;
+
+    ret = mtk_ccci_send_mailbox(speech->ccci,
+                                MTK_MSG_A2M_MUTE_SPH_DL,
+                                1,
+                                0);
+    if (ret < 0) {
+        speech_send_failed(speech, ret);
+        return ret;
+    }
+
+    ret = mtk_ccci_send_mailbox(speech->ccci,
+                                MTK_MSG_A2M_MUTE_SPH_UL,
+                                1,
+                                0);
+    if (ret < 0)
+        speech_send_failed(speech, ret);
+
+    return ret;
+}
+
+static gint
+speech_restore_routing_mute(MtkSpeech *speech)
+{
+    gint ret;
+
+    if (speech == NULL || speech->ccci == NULL)
+        return -EINVAL;
+
+    ret = mtk_ccci_send_mailbox(speech->ccci,
+                                MTK_MSG_A2M_MUTE_SPH_UL,
+                                speech->uplink_muted ? 1 : 0,
+                                0);
+    if (ret < 0) {
+        speech_send_failed(speech, ret);
+        return ret;
+    }
+
+    ret = mtk_ccci_send_mailbox(speech->ccci,
+                                MTK_MSG_A2M_MUTE_SPH_DL,
+                                speech->downlink_muted ? 1 : 0,
+                                0);
+    if (ret < 0)
+        speech_send_failed(speech, ret);
+
+    return ret;
+}
+
+static gboolean
+speech_routing_unmute(gpointer user_data)
+{
+    MtkSpeech *speech = user_data;
+    gint ret;
+
+    speech_source_finish(&speech->routing_unmute_source);
+    if (!speech->routing_muted)
+        return G_SOURCE_REMOVE;
+
+    speech->routing_muted = FALSE;
+    if (speech->state == AUDIO_MANAGER_CALL_STATE_IDLE ||
+        speech->state == AUDIO_MANAGER_CALL_STATE_STOPPING ||
+        speech->state == AUDIO_MANAGER_CALL_STATE_ERROR)
+        return G_SOURCE_REMOVE;
+
+    ret = speech_restore_routing_mute(speech);
+    if (ret < 0)
+        g_warning("failed to restore MediaTek speech mute state after routing: %s",
+                  g_strerror(-ret));
+
+    return G_SOURCE_REMOVE;
 }
 
 static gint
@@ -1237,6 +1319,7 @@ mtk_speech_free(MtkSpeech *speech)
     speech_source_clear(&speech->ack_timeout_source);
     speech_source_clear(&speech->modem_monitor_source);
     speech_source_clear(&speech->reconnect_source);
+    speech_source_clear(&speech->routing_unmute_source);
 
     if (mtk_speech_is_active(speech))
         mtk_speech_stop(speech);
@@ -1270,6 +1353,7 @@ speech_start_path(MtkSpeech *speech,
         output_device != AUDIO_MANAGER_OUTPUT_BLUETOOTH) {
         ret = speech_open_pcm(speech, output_device, &error);
         if (ret < 0) {
+            speech->last_start_failed_pcm = TRUE;
             if (error != NULL) {
                 g_warning("%s", error->message);
                 g_error_free(error);
@@ -1279,12 +1363,16 @@ speech_start_path(MtkSpeech *speech,
 
         /* kernel space starts modem output before modem input. */
         ret = audio_alsa_pcm_start(speech->playback);
-        if (ret < 0)
+        if (ret < 0) {
+            speech->last_start_failed_pcm = TRUE;
             goto fail_pcm;
+        }
 
         ret = audio_alsa_pcm_start(speech->capture);
-        if (ret < 0)
+        if (ret < 0) {
+            speech->last_start_failed_pcm = TRUE;
             goto fail_pcm;
+        }
     }
 
     ret = speech_info_init(speech, &info, output_device, input_device);
@@ -1333,6 +1421,7 @@ mtk_speech_start(MtkSpeech *speech,
 
     speech->desired_active = TRUE;
     speech->modem_epof = FALSE;
+    speech->last_start_failed_pcm = FALSE;
     speech->deferred_device_change = FALSE;
     speech->transport = transport;
     speech_set_state(speech, AUDIO_MANAGER_CALL_STATE_PREPARING);
@@ -1412,6 +1501,8 @@ mtk_speech_stop(MtkSpeech *speech)
     if (speech == NULL)
         return -EINVAL;
 
+    speech_source_clear(&speech->routing_unmute_source);
+    speech->routing_muted = FALSE;
     speech->deferred_device_change = FALSE;
     if (speech->state == AUDIO_MANAGER_CALL_STATE_IDLE)
         return 0;
@@ -1774,6 +1865,47 @@ mtk_speech_set_downlink_mute(MtkSpeech *speech,
 
     speech->deferred_downlink_mute = TRUE;
     return speech_flush_deferred_controls(speech);
+}
+
+gint
+mtk_speech_routing_mute_start(MtkSpeech *speech)
+{
+    gint ret;
+
+    if (speech == NULL)
+        return -EINVAL;
+    if (speech->state != AUDIO_MANAGER_CALL_STATE_ACTIVE &&
+        speech->state != AUDIO_MANAGER_CALL_STATE_DEVICE_CHANGING)
+        return 0;
+
+    speech_source_clear(&speech->routing_unmute_source);
+    speech->routing_muted = TRUE;
+
+    ret = speech_send_routing_mute_start(speech);
+    if (ret < 0)
+        speech->routing_muted = FALSE;
+    return ret;
+}
+
+gint
+mtk_speech_routing_mute_end(MtkSpeech *speech)
+{
+    if (speech == NULL)
+        return -EINVAL;
+    if (!speech->routing_muted)
+        return 0;
+
+    speech_source_clear(&speech->routing_unmute_source);
+    speech->routing_unmute_source = speech_timeout_source_new(speech,
+                                                              MTK_SPEECH_ROUTING_UNMUTE_MS,
+                                                              speech_routing_unmute);
+    return 0;
+}
+
+gboolean
+mtk_speech_last_start_failed_pcm(MtkSpeech *speech)
+{
+    return speech != NULL && speech->last_start_failed_pcm;
 }
 
 gboolean

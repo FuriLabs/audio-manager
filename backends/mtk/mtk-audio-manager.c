@@ -160,6 +160,32 @@ mtk_smartpa_detect(const MtkConfig *config,
     return FALSE;
 }
 
+static gboolean
+mtk_call_sidetone_enabled(AudioManagerCallTransport transport,
+                          AudioManagerOutputDevice output)
+{
+    if (transport != AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS)
+        return FALSE;
+
+    return output == AUDIO_MANAGER_OUTPUT_RECEIVER ||
+           output == AUDIO_MANAGER_OUTPUT_HEADPHONES ||
+           output == AUDIO_MANAGER_OUTPUT_HEADSET;
+}
+
+static gint
+mtk_set_call_sidetone(AudioManagerBackend *backend,
+                      gboolean enabled)
+{
+    gint ret;
+
+    ret = audio_alsa_control_set_index(backend->card,
+                                       "Sidetone Filter Switch",
+                                       enabled ? 1 : 0);
+    if (ret == -ENOENT)
+        return 0;
+    return ret;
+}
+
 static gint
 apply_media_output_gain(AudioManagerBackend *backend)
 {
@@ -1984,6 +2010,8 @@ mtk_backend_call_start(AudioManagerBackend *backend,
 {
     AudioManagerOutputDevice speech_output;
     AudioManagerInputDevice speech_input;
+    const gchar *downlink_route = NULL;
+    gboolean direct = FALSE;
     gint ret;
 
     if (transport != AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
@@ -2004,12 +2032,14 @@ mtk_backend_call_start(AudioManagerBackend *backend,
             backend->input_device == AUDIO_MANAGER_INPUT_USB)
             return -ENOTSUP;
 
-        if (backend->output_device != AUDIO_MANAGER_OUTPUT_BLUETOOTH) {
+        direct = backend->output_device != AUDIO_MANAGER_OUTPUT_BLUETOOTH;
+        if (direct) {
+            downlink_route = modem_downlink_route(backend, backend->output_device);
             ret = apply_route(backend, backend->config->modem_uplink, TRUE);
             if (ret < 0)
                 return ret;
 
-            ret = apply_route(backend, modem_downlink_route(backend, backend->output_device), TRUE);
+            ret = apply_route(backend, downlink_route, TRUE);
             if (ret < 0) {
                 apply_route(backend, backend->config->modem_uplink, FALSE);
                 return ret;
@@ -2027,16 +2057,45 @@ mtk_backend_call_start(AudioManagerBackend *backend,
                            speech_output,
                            speech_input,
                            transport);
+    if (ret < 0 && direct && mtk_speech_last_start_failed_pcm(backend->speech)) {
+        g_warning("MediaTek speech PCM start failed: %s. retrying",
+                  g_strerror(-ret));
+
+        apply_route(backend, downlink_route, FALSE);
+        apply_route(backend, backend->config->modem_uplink, FALSE);
+        g_usleep(20 * 1000);
+
+        ret = apply_route(backend, backend->config->modem_uplink, TRUE);
+        if (ret == 0)
+            ret = apply_route(backend, downlink_route, TRUE);
+        if (ret == 0)
+            ret = mtk_speech_start(backend->speech,
+                                   speech_output,
+                                   speech_input,
+                                   transport);
+    }
+
     if (ret < 0) {
-        if (transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
-            backend->output_device != AUDIO_MANAGER_OUTPUT_BLUETOOTH) {
-            apply_route(backend, modem_downlink_route(backend, backend->output_device), FALSE);
+        if (direct) {
+            apply_route(backend, downlink_route, FALSE);
             apply_route(backend, backend->config->modem_uplink, FALSE);
         }
         return ret;
     }
 
     backend->call_transport = transport;
+
+    ret = mtk_set_call_sidetone(backend,
+                                mtk_call_sidetone_enabled(transport,
+                                                          backend->output_device));
+    if (ret < 0) {
+        mtk_speech_stop(backend->speech);
+        if (direct) {
+            apply_route(backend, downlink_route, FALSE);
+            apply_route(backend, backend->config->modem_uplink, FALSE);
+        }
+        return ret;
+    }
 
     g_debug("MediaTek cellular call started transport=%s",
             transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTFUL ?
@@ -2047,10 +2106,16 @@ mtk_backend_call_start(AudioManagerBackend *backend,
 static gint
 mtk_backend_call_stop(AudioManagerBackend *backend)
 {
-    gint ret;
+    gint ret = 0;
     gint tmp;
 
-    ret = mtk_speech_stop(backend->speech);
+    tmp = mtk_set_call_sidetone(backend, FALSE);
+    if (tmp < 0)
+        ret = tmp;
+
+    tmp = mtk_speech_stop(backend->speech);
+    if (tmp < 0 && ret == 0)
+        ret = tmp;
 
     if (backend->call_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS &&
         backend->output_device != AUDIO_MANAGER_OUTPUT_BLUETOOTH) {
@@ -2085,6 +2150,8 @@ mtk_backend_call_set_route(AudioManagerBackend *backend,
     gboolean new_direct;
     gboolean modem_downlink_changed;
     gboolean switched_direct_route = FALSE;
+    gboolean routing_muted = FALSE;
+    gint tmp;
     gint ret;
 
     if (backend == NULL)
@@ -2114,23 +2181,32 @@ mtk_backend_call_set_route(AudioManagerBackend *backend,
                  output != AUDIO_MANAGER_OUTPUT_BLUETOOTH;
     modem_downlink_changed = g_strcmp0(old_modem_downlink, new_modem_downlink) != 0;
 
+    ret = mtk_speech_routing_mute_start(backend->speech);
+    if (ret < 0)
+        return ret;
+    routing_muted = TRUE;
+
+    ret = mtk_set_call_sidetone(backend, FALSE);
+    if (ret < 0)
+        goto out;
+
     if (new_direct && !old_direct) {
         ret = apply_route(backend, backend->config->modem_uplink, TRUE);
         if (ret < 0)
-            return ret;
+            goto rollback_sidetone;
         ret = apply_route(backend, new_modem_downlink, TRUE);
         if (ret < 0) {
             apply_route(backend, backend->config->modem_uplink, FALSE);
-            return ret;
+            goto rollback_sidetone;
         }
     } else if (old_direct && new_direct && modem_downlink_changed) {
         ret = apply_route(backend, new_modem_downlink, TRUE);
         if (ret < 0)
-            return ret;
+            goto rollback_sidetone;
         ret = apply_route(backend, old_modem_downlink, FALSE);
         if (ret < 0) {
             apply_route(backend, new_modem_downlink, FALSE);
-            return ret;
+            goto rollback_sidetone;
         }
         switched_direct_route = TRUE;
     }
@@ -2181,12 +2257,29 @@ mtk_backend_call_set_route(AudioManagerBackend *backend,
         apply_route(backend, backend->config->modem_uplink, FALSE);
     }
 
+    ret = mtk_set_call_sidetone(backend,
+                                mtk_call_sidetone_enabled(transport, output));
+    if (ret < 0)
+        goto rollback_committed;
+
     if (output == AUDIO_MANAGER_OUTPUT_SPEAKER)
         mtk_smartpa_log_state(backend->config, backend->card);
     refresh_media_output_gain(backend);
     refresh_capture_gain(backend);
-    return 0;
+    goto out;
 
+rollback_committed:
+    backend->output_device = old_output;
+    backend->input_device = old_input;
+    backend->call_transport = old_transport;
+    if (old_direct && !new_direct) {
+        apply_route(backend, backend->config->modem_uplink, TRUE);
+        apply_route(backend, old_modem_downlink, TRUE);
+    }
+    if (old_transport != transport)
+        mtk_speech_set_transport(backend->speech, old_transport, old_output, old_input);
+    else if (old_transport == AUDIO_MANAGER_CALL_TRANSPORT_HOSTLESS)
+        mtk_speech_device_change(backend->speech, old_output, old_input);
 rollback_output:
     if (g_strcmp0(old_output_route, new_output_route) != 0) {
         apply_route(backend, new_output_route, FALSE);
@@ -2204,6 +2297,19 @@ rollback_direct:
     } else if (new_direct && !old_direct) {
         apply_route(backend, new_modem_downlink, FALSE);
         apply_route(backend, backend->config->modem_uplink, FALSE);
+    }
+rollback_sidetone:
+    tmp = mtk_set_call_sidetone(backend,
+                                mtk_call_sidetone_enabled(old_transport,
+                                                          old_output));
+    if (tmp < 0)
+        g_warning("failed to restore MediaTek sidetone after route rollback: %s",
+                  g_strerror(-tmp));
+out:
+    if (routing_muted) {
+        tmp = mtk_speech_routing_mute_end(backend->speech);
+        if (tmp < 0 && ret == 0)
+            ret = tmp;
     }
     return ret;
 }

@@ -141,6 +141,24 @@ mtk_speech_set_downlink_mute(MtkSpeech *speech,
                              gboolean muted);
 
 /**
+ * Temporarily mute modem speech while changing call routes.
+ */
+gint
+mtk_speech_routing_mute_start(MtkSpeech *speech);
+
+/**
+ * Restore user requested modem mute state after the routing settle delay.
+ */
+gint
+mtk_speech_routing_mute_end(MtkSpeech *speech);
+
+/**
+ * Return whether the most recent speech start failed while opening or starting PCM.
+ */
+gboolean
+mtk_speech_last_start_failed_pcm(MtkSpeech *speech);
+
+/**
  * Return TRUE when a speech session is active or transitioning.
  */
 gboolean
