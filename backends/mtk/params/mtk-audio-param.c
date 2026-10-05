@@ -19,8 +19,6 @@
 typedef struct {
     gchar *path;
     gchar *param_id;
-    gchar **tokens;
-    gsize token_count;
 } MtkAudioParamPath;
 
 struct MtkAudioParam {
@@ -39,7 +37,6 @@ param_path_free(gpointer data)
         return;
     g_free(path->path);
     g_free(path->param_id);
-    g_strfreev(path->tokens);
     g_free(path);
 }
 
@@ -106,7 +103,6 @@ mtk_audio_param_load(const gchar *path, GError **error)
         MtkAudioParamPath *entry;
         gchar *p;
         gchar *id;
-        guint n = 0;
 
         if (node->type != XML_ELEMENT_NODE ||
             xmlStrcmp(node->name, BAD_CAST "Param") != 0)
@@ -121,13 +117,6 @@ mtk_audio_param_load(const gchar *path, GError **error)
         entry = g_new0(MtkAudioParamPath, 1);
         entry->path = p;
         entry->param_id = id;
-        entry->tokens = g_strsplit(p, ",", -1);
-        while (entry->tokens[n] != NULL) {
-            g_strstrip(entry->tokens[n]);
-            if (*entry->tokens[n] != '\0')
-                entry->token_count++;
-            n++;
-        }
         g_ptr_array_add(param->paths, entry);
     }
 
@@ -211,64 +200,52 @@ mtk_audio_param_get_param(MtkAudioParam *param,
     return NULL;
 }
 
-static gboolean
-token_is_category(const gchar *token,
-                  const gchar *const *categories,
-                  gsize category_count)
+const gchar *
+mtk_audio_param_get_first_param(MtkAudioParam *param,
+                                const gchar *const *paths,
+                                gsize path_count,
+                                const gchar *name,
+                                const gchar **matched_path)
 {
     gsize i;
-    for (i = 0; i < category_count; i++) {
-        if (categories[i] != NULL && g_strcmp0(token, categories[i]) == 0)
-            return TRUE;
-    }
-    return FALSE;
-}
-
-const gchar *
-mtk_audio_param_get_best_param(MtkAudioParam *param,
-                               const gchar *const *categories,
-                               gsize category_count,
-                               const gchar *name,
-                               const gchar **matched_path)
-{
-    MtkAudioParamPath *best = NULL;
-    guint i;
 
     if (matched_path != NULL)
         *matched_path = NULL;
-    if (param == NULL || categories == NULL || name == NULL)
+    if (param == NULL || paths == NULL || name == NULL)
         return NULL;
 
-    for (i = 0; i < param->paths->len; i++) {
-        MtkAudioParamPath *entry = g_ptr_array_index(param->paths, i);
-        guint j;
-        gboolean matches = TRUE;
+    for (i = 0; i < path_count; i++) {
+        const gchar *value;
 
-        if (entry->path[0] == '\0') {
-            if (best == NULL)
-                best = entry;
+        if (paths[i] == NULL)
             continue;
-        }
-        for (j = 0; entry->tokens[j] != NULL; j++) {
-            const gchar *token = entry->tokens[j];
-            if (*token == '\0')
-                continue;
-            if (!token_is_category(token, categories, category_count)) {
-                matches = FALSE;
-                break;
-            }
-        }
-        if (!matches)
+        value = mtk_audio_param_get_param(param, paths[i], name);
+        if (value == NULL)
             continue;
-        if (best == NULL || entry->token_count > best->token_count)
-            best = entry;
+        if (matched_path != NULL)
+            *matched_path = paths[i];
+        return value;
     }
 
-    if (best == NULL)
+    return NULL;
+}
+
+gsize
+mtk_audio_param_get_path_count(MtkAudioParam *param)
+{
+    return param != NULL && param->paths != NULL ? param->paths->len : 0;
+}
+
+const gchar *
+mtk_audio_param_get_path(MtkAudioParam *param,
+                         gsize index)
+{
+    MtkAudioParamPath *entry;
+
+    if (param == NULL || param->paths == NULL || index >= param->paths->len)
         return NULL;
-    if (matched_path != NULL)
-        *matched_path = best->path;
-    return unit_param_value(param, best->param_id, name);
+    entry = g_ptr_array_index(param->paths, index);
+    return entry->path;
 }
 
 gint

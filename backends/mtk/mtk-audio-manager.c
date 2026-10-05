@@ -2360,6 +2360,8 @@ mtk_backend_call_set_volume(AudioManagerBackend *backend,
         return -ENOTSUP;
 
     ret = mtk_speech_volume_calculate(backend->speech_volume,
+                                      mtk_speech_get_band(backend->speech),
+                                      mtk_speech_get_network(backend->speech),
                                       speech_profile,
                                       gain_profile,
                                       backend->call_volume,
@@ -2368,6 +2370,8 @@ mtk_backend_call_set_volume(AudioManagerBackend *backend,
         return ret;
 
     ret = mtk_speech_volume_calculate(backend->speech_volume,
+                                      mtk_speech_get_band(backend->speech),
+                                      mtk_speech_get_network(backend->speech),
                                       speech_profile,
                                       gain_profile,
                                       volume,

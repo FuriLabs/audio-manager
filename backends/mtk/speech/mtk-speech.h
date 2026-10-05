@@ -158,4 +158,10 @@ mtk_speech_get_state(MtkSpeech *speech);
 AudioManagerSpeechBand
 mtk_speech_get_band(MtkSpeech *speech);
 
+/**
+ * Get the current modem network index.
+ */
+guint
+mtk_speech_get_network(MtkSpeech *speech);
+
 #endif /* MTK_SPEECH_H */

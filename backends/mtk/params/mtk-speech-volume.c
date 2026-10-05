@@ -43,6 +43,8 @@ struct MtkSpeechVolume {
     MtkAudioParam *volume_spec;
     MtkAudioParam *playback_vol_ana;
     MtkAudioParam *record_vol;
+    MtkAudioParam *network;
+    gchar *network_names[16];
 
     gint step_per_db;
     gint digital_db_min;
@@ -93,6 +95,100 @@ parse_scalar(const gchar *value, gint *out)
     return 0;
 }
 
+static const gchar *
+network_name_from_path(const gchar *path)
+{
+    const gchar *comma;
+
+    if (path == NULL || *path == '\0')
+        return NULL;
+    comma = strrchr(path, ',');
+    return comma != NULL ? comma + 1 : path;
+}
+
+static gint
+init_network_map(MtkSpeechVolume *volume)
+{
+    const gchar *first = NULL;
+    gsize path_count;
+    gsize i;
+    guint bit;
+
+    path_count = mtk_audio_param_get_path_count(volume->network);
+    for (i = 0; i < path_count; i++) {
+        const gchar *path = mtk_audio_param_get_path(volume->network, i);
+        const gchar *name = network_name_from_path(path);
+        const gchar *value;
+        gint support;
+
+        if (name == NULL || *name == '\0')
+            continue;
+        value = mtk_audio_param_get_param(volume->network, path,
+                                          "speech_network_support");
+        if (parse_scalar(value, &support) < 0 || support < 0)
+            continue;
+        if (first == NULL)
+            first = name;
+        for (bit = 0; bit < G_N_ELEMENTS(volume->network_names); bit++) {
+            if ((((guint)support) & (1U << bit)) != 0 && volume->network_names[bit] == NULL)
+                volume->network_names[bit] = g_strdup(name);
+        }
+    }
+
+    if (first == NULL)
+        return -ENOENT;
+    for (bit = 0; bit < G_N_ELEMENTS(volume->network_names); bit++) {
+        if (volume->network_names[bit] == NULL)
+            volume->network_names[bit] = g_strdup(first);
+    }
+    return 0;
+}
+
+static const gchar *
+speech_band_name(AudioManagerSpeechBand band)
+{
+    switch (band) {
+    case AUDIO_MANAGER_SPEECH_BAND_WIDE:
+        return "WB";
+    case AUDIO_MANAGER_SPEECH_BAND_SUPER_WIDE:
+        return "SWB";
+    case AUDIO_MANAGER_SPEECH_BAND_NARROW:
+    case AUDIO_MANAGER_SPEECH_BAND_UNKNOWN:
+    default:
+        return "NB";
+    }
+}
+
+static const gchar *
+speech_volume_param(MtkSpeechVolume *volume,
+                    AudioManagerSpeechBand band,
+                    guint network,
+                    const gchar *speech_profile,
+                    const gchar *name,
+                    gchar **matched_path)
+{
+    const gchar *network_name;
+    const gchar *value;
+    gchar *hal_path;
+
+    if (network >= G_N_ELEMENTS(volume->network_names))
+        network = 0;
+    network_name = volume->network_names[network];
+    hal_path = g_strdup_printf("Band,%s,Profile,%s,Network,%s",
+                               speech_band_name(band), speech_profile, network_name);
+    value = mtk_audio_param_get_param(volume->speech_vol, hal_path, name);
+    if (value != NULL) {
+        *matched_path = hal_path;
+        return value;
+    }
+    g_free(hal_path);
+
+    value = mtk_audio_param_get_param(volume->speech_vol, speech_profile, name);
+    if (value != NULL)
+        *matched_path = g_strdup(speech_profile);
+    return value;
+}
+
 static gint
 load_list(MtkAudioParam *param,
           const gchar *path,
@@ -129,10 +225,13 @@ load_int(MtkAudioParam *param,
 static gint
 load_volume_spec(MtkSpeechVolume *volume, GError **error)
 {
-    const gchar *path = "Common_SPK_LO";
+    const gchar *path = "VolumeParam,Common";
     const gchar *bad_param = NULL;
     gsize count;
     gint ret;
+
+    if (mtk_audio_param_get_param(volume->volume_spec, path, "step_per_db") == NULL)
+        path = "Common_SPK_LO";
 
     LOAD_INT(step_per_db, "step_per_db");
     LOAD_INT(digital_db_min, "play_digi_range_min");
@@ -243,6 +342,14 @@ mtk_speech_volume_new(const gchar *audio_param_directory,
     volume->volume_spec = load_param(audio_param_directory, "Volume_AudioParam.xml", error);
     if (volume->volume_spec == NULL)
         goto fail;
+    volume->network = load_param(audio_param_directory, "SpeechNetwork_AudioParam.xml", error);
+    if (volume->network == NULL)
+        goto fail;
+    if (init_network_map(volume) < 0) {
+        g_set_error(error, AUDIO_MANAGER_ERROR, AUDIO_MANAGER_ERROR_CONFIG,
+                    "MediaTek SpeechNetwork_AudioParam.xml has no usable network mapping");
+        goto fail;
+    }
 
     if (load_volume_spec(volume, error) < 0)
         goto fail;
@@ -285,6 +392,9 @@ mtk_speech_volume_free(MtkSpeechVolume *volume)
     mtk_audio_param_free(volume->volume_spec);
     mtk_audio_param_free(volume->playback_vol_ana);
     mtk_audio_param_free(volume->record_vol);
+    mtk_audio_param_free(volume->network);
+    for (i = 0; i < G_N_ELEMENTS(volume->network_names); i++)
+        g_free(volume->network_names[i]);
     g_free(volume->voice_gain_db);
     g_free(volume->voice_gain_idx);
     g_free(volume->voice_mixer);
@@ -364,20 +474,40 @@ analog_db_to_index(MtkSpeechVolume *volume,
     return 0;
 }
 
-static gint
-profile_scalar(MtkAudioParam *param, const gchar *path, const gchar *name, gint *out)
+static const gchar *
+profile_param(MtkAudioParam *param,
+              const gchar *profile,
+              const gchar *name)
 {
-    return parse_scalar(mtk_audio_param_get_param(param, path, name), out);
+    const gchar *value;
+    gchar *path;
+
+    path = g_strdup_printf("Profile,%s", profile);
+    value = mtk_audio_param_get_param(param, path, name);
+    g_free(path);
+    if (value != NULL)
+        return value;
+    return mtk_audio_param_get_param(param, profile, name);
+}
+
+static gint
+profile_scalar(MtkAudioParam *param, const gchar *profile, const gchar *name, gint *out)
+{
+    return parse_scalar(profile_param(param, profile, name), out);
 }
 
 static gint
 calculate_sidetone(MtkSpeechVolume *volume,
+                   AudioManagerSpeechBand band,
+                   guint network,
                    const gchar *speech_profile,
                    gint analog_db,
                    gint sw_agc,
                    glong *gain,
                    glong *positive_db)
 {
+    const gchar *value;
+    gchar *matched_path = NULL;
     gint sidetone;
     gint idx;
 
@@ -388,8 +518,13 @@ calculate_sidetone(MtkSpeechVolume *volume,
         return 0;
     }
 
-    if (profile_scalar(volume->speech_vol, speech_profile, "stf_gain", &sidetone) < 0)
+    value = speech_volume_param(volume, band, network, speech_profile,
+                                "stf_gain", &matched_path);
+    if (parse_scalar(value, &sidetone) < 0) {
+        g_free(matched_path);
         return -ENOENT;
+    }
+    g_free(matched_path);
     if (sidetone < 0)
         sidetone = 0;
     if (sidetone > volume->sidetone_index_max)
@@ -418,6 +553,8 @@ calculate_sidetone(MtkSpeechVolume *volume,
 
 gint
 mtk_speech_volume_calculate(MtkSpeechVolume *volume,
+                            AudioManagerSpeechBand band,
+                            guint network,
                             const gchar *speech_profile,
                             const gchar *gain_profile,
                             gdouble normalized_volume,
@@ -445,6 +582,8 @@ mtk_speech_volume_calculate(MtkSpeechVolume *volume,
     gint ret = 0;
     const gchar *failure_stage = NULL;
     const gchar *ul_profile;
+    const gchar *speech_value;
+    gchar *speech_path = NULL;
 
     if (volume == NULL || speech_profile == NULL || gain_profile == NULL || gain == NULL)
         return -EINVAL;
@@ -458,7 +597,9 @@ mtk_speech_volume_calculate(MtkSpeechVolume *volume,
     if (gain->update_parameter_volume_index)
         gain->parameter_volume_index = gain->ui_index - 1;
 
-    ret = mtk_audio_param_parse_i32_list(mtk_audio_param_get_param(volume->speech_vol, speech_profile, "dl_gain"),
+    speech_value = speech_volume_param(volume, band, network, speech_profile,
+                                       "dl_gain", &speech_path);
+    ret = mtk_audio_param_parse_i32_list(speech_value,
                                          &dl_indices,
                                          &dl_count);
     if (ret < 0 || dl_count < 7) {
@@ -466,14 +607,14 @@ mtk_speech_volume_calculate(MtkSpeechVolume *volume,
         ret = -ENOENT;
         goto out;
     }
-    ret = mtk_audio_param_parse_i32_list(mtk_audio_param_get_param(volume->dl_map, gain_profile, "dl_digital_gain"),
+    ret = mtk_audio_param_parse_i32_list(profile_param(volume->dl_map, gain_profile, "dl_digital_gain"),
                                          &dl_digital,
                                          &digital_count);
     if (ret < 0) {
         failure_stage = "VolumeGainMap dl_digital_gain";
         goto out;
     }
-    ret = mtk_audio_param_parse_i32_list(mtk_audio_param_get_param(volume->dl_map, gain_profile, "dl_analog_gain"),
+    ret = mtk_audio_param_parse_i32_list(profile_param(volume->dl_map, gain_profile, "dl_analog_gain"),
                                          &dl_analog,
                                          &analog_count);
     if (ret < 0) {
@@ -509,7 +650,10 @@ mtk_speech_volume_calculate(MtkSpeechVolume *volume,
         goto out;
     }
 
-    if (profile_scalar(volume->speech_vol, speech_profile, "ul_gain", &ul_gain) < 0) {
+    g_clear_pointer(&speech_path, g_free);
+    speech_value = speech_volume_param(volume, band, network, speech_profile,
+                                       "ul_gain", &speech_path);
+    if (parse_scalar(speech_value, &ul_gain) < 0) {
         failure_stage = "SpeechVol ul_gain";
         ret = -ENOENT;
         goto out;
@@ -526,14 +670,14 @@ mtk_speech_volume_calculate(MtkSpeechVolume *volume,
         goto out;
     }
 
-    ret = mtk_audio_param_parse_i32_list(mtk_audio_param_get_param(volume->ul_map, ul_profile, "swagc_gain_map"),
+    ret = mtk_audio_param_parse_i32_list(profile_param(volume->ul_map, ul_profile, "swagc_gain_map"),
                                          &swagc,
                                          &swagc_count);
     if (ret < 0) {
         failure_stage = "VolumeGainMapUL swagc_gain_map";
         goto out;
     }
-    ret = mtk_audio_param_parse_i32_list(mtk_audio_param_get_param(volume->ul_map, ul_profile, "ul_pga_gain_map"),
+    ret = mtk_audio_param_parse_i32_list(profile_param(volume->ul_map, ul_profile, "ul_pga_gain_map"),
                                          &pga_map,
                                          &pga_count);
     if (ret < 0)
@@ -569,7 +713,7 @@ mtk_speech_volume_calculate(MtkSpeechVolume *volume,
         }
     }
 
-    ret = calculate_sidetone(volume, speech_profile, analog_db, sw_agc,
+    ret = calculate_sidetone(volume, band, network, speech_profile, analog_db, sw_agc,
                              &gain->sidetone_gain,
                              &gain->sidetone_positive_gain_db);
     if (ret < 0) {
@@ -577,11 +721,11 @@ mtk_speech_volume_calculate(MtkSpeechVolume *volume,
         goto out;
     }
 
-    g_debug("MediaTek speech gain profile=%s gain_profile=%s volume=%.3f ui=%u "
+    g_debug("MediaTek speech gain band=%s network=%u profile=%s gain_profile=%s volume=%.3f ui=%u "
             "dl_idx=%d dl_digital=%d dl_msg=%d analog_db=%d analog_ctl=%s "
             "analog_idx=%ld mic_idx_max=%d ul_idx=%d sw_agc=%d ul_msg=%d "
             "sidetone=%ld positive=%ld",
-            speech_profile, gain_profile, normalized_volume, gain->ui_index,
+            speech_band_name(band), network, speech_profile, gain_profile, normalized_volume, gain->ui_index,
             dl_index, digital_db, gain->modem_downlink_gain, analog_db,
             gain->downlink_analog_control != NULL ? gain->downlink_analog_control : "none",
             gain->downlink_analog_index, mic_index_max, mic_delta, sw_agc,
@@ -594,6 +738,7 @@ out:
                 speech_profile, gain_profile,
                 failure_stage != NULL ? failure_stage : "unknown",
                 g_strerror(-ret));
+    g_free(speech_path);
     g_free(dl_indices);
     g_free(dl_digital);
     g_free(dl_analog);
@@ -619,7 +764,7 @@ media_role_name(AudioManagerCaptureRole role)
 }
 
 static const gchar *
-media_output_profile(AudioManagerOutputDevice device)
+media_playback_profile(AudioManagerOutputDevice device)
 {
     switch (device) {
     case AUDIO_MANAGER_OUTPUT_RECEIVER:
@@ -630,10 +775,22 @@ media_output_profile(AudioManagerOutputDevice device)
         return "HP";
     case AUDIO_MANAGER_OUTPUT_HEADSET:
         return "HS";
-    case AUDIO_MANAGER_OUTPUT_BLUETOOTH:
-        return "BT_A2DP";
-    case AUDIO_MANAGER_OUTPUT_USB:
-        return "USB";
+    default:
+        return NULL;
+    }
+}
+
+static const gchar *
+media_playback_device_profile(AudioManagerOutputDevice device)
+{
+    switch (device) {
+    case AUDIO_MANAGER_OUTPUT_RECEIVER:
+        return "RCV";
+    case AUDIO_MANAGER_OUTPUT_SPEAKER:
+        return "SPK";
+    case AUDIO_MANAGER_OUTPUT_HEADPHONES:
+    case AUDIO_MANAGER_OUTPUT_HEADSET:
+        return "HS";
     default:
         return NULL;
     }
@@ -667,10 +824,12 @@ mtk_speech_volume_apply_media_playback_gain(MtkSpeechVolume *volume,
                                             AudioManagerOutputDevice device)
 {
     const gchar *profile;
+    const gchar *device_profile;
     const gchar *name;
     const gchar *control;
     const gchar *value;
     gchar *path;
+    gsize gain_count = 0;
     gint gain;
     gint ret;
 
@@ -679,38 +838,39 @@ mtk_speech_volume_apply_media_playback_gain(MtkSpeechVolume *volume,
     if (volume->playback_vol_ana == NULL)
         return -ENOENT;
 
-    profile = media_output_profile(device);
+    profile = media_playback_profile(device);
+    device_profile = media_playback_device_profile(device);
     name = media_playback_param(device, &control, volume);
-    if (profile == NULL || name == NULL || control == NULL)
+    if (profile == NULL || device_profile == NULL || name == NULL || control == NULL)
         return -ENOTSUP;
 
     path = g_strdup_printf("Scene,Default,Volume type,Music,Profile,%s", profile);
     value = mtk_audio_param_get_param(volume->playback_vol_ana, path, name);
+    if (value == NULL) {
+        g_free(path);
+        if (device == AUDIO_MANAGER_OUTPUT_SPEAKER)
+            path = g_strdup("Default,Others,SPK");
+        else
+            path = g_strdup_printf("Others,%s", device_profile);
+        value = mtk_audio_param_get_param(volume->playback_vol_ana, path, name);
+    }
     if (value == NULL && device == AUDIO_MANAGER_OUTPUT_SPEAKER) {
         g_free(path);
-        path = g_strdup("Scene,Default,Volume type,Music,Profile,SPK_LO");
+        path = g_strdup("Others,SPK");
         value = mtk_audio_param_get_param(volume->playback_vol_ana, path, name);
     }
     if (value == NULL) {
-        const gchar *categories[] = {
-            "Scene", "Default", "Volume type", "Music", "Profile",
-            profile,
-            device == AUDIO_MANAGER_OUTPUT_SPEAKER ? "SPK_LO" : NULL,
-        };
-        const gchar *matched_path = NULL;
-
-        value = mtk_audio_param_get_best_param(volume->playback_vol_ana,
-                                               categories,
-                                               G_N_ELEMENTS(categories),
-                                               name,
-                                               &matched_path);
-        if (value != NULL && matched_path != NULL) {
-            g_free(path);
-            path = g_strdup(matched_path);
-        }
+        ret = -ENOENT;
+        goto out;
     }
+
     ret = parse_scalar(value, &gain);
-    if (ret == 0 && gain < 0) {
+    if (ret < 0) {
+        g_warning("invalid MediaTek media playback gain device=%d path='%s' control='%s' value='%s'",
+                  device, path, control, value);
+        goto out;
+    }
+    if (gain < 0) {
         /*
          * PlaybackVolAna uses negative PGA values to mean that this analog
          * stage is not applicable for the selected route.
@@ -721,30 +881,26 @@ mtk_speech_volume_apply_media_playback_gain(MtkSpeechVolume *volume,
         goto out;
     }
 
-    if (ret == 0) {
-        gsize gain_count = 0;
-
-        switch (device) {
-        case AUDIO_MANAGER_OUTPUT_RECEIVER:
-            gain_count = volume->voice_gain_count;
-            break;
-        case AUDIO_MANAGER_OUTPUT_HEADPHONES:
-        case AUDIO_MANAGER_OUTPUT_HEADSET:
-            gain_count = volume->headphone_gain_count;
-            break;
-        case AUDIO_MANAGER_OUTPUT_SPEAKER:
-            gain_count = volume->speaker_gain_count;
-            break;
-        default:
-            break;
-        }
-
-        /* clamp the PlaybackVolAna ordinal to the codec gain table before writing the mixer */
-        if (gain_count == 0)
-            ret = -ENOENT;
-        else if ((gsize)gain >= gain_count)
-            gain = (gint)gain_count - 1;
+    switch (device) {
+    case AUDIO_MANAGER_OUTPUT_RECEIVER:
+        gain_count = volume->voice_gain_count;
+        break;
+    case AUDIO_MANAGER_OUTPUT_HEADPHONES:
+    case AUDIO_MANAGER_OUTPUT_HEADSET:
+        gain_count = volume->headphone_gain_count;
+        break;
+    case AUDIO_MANAGER_OUTPUT_SPEAKER:
+        gain_count = volume->speaker_gain_count;
+        break;
+    default:
+        break;
     }
+
+    /* clamp the PlaybackVolAna ordinal to the codec gain table before writing the mixer */
+    if (gain_count == 0)
+        ret = -ENOENT;
+    else if ((gsize)gain >= gain_count)
+        gain = (gint)gain_count - 1;
 
     if (ret == 0)
         ret = audio_alsa_control_set_index(card, control, gain);
@@ -775,10 +931,25 @@ record_profile(AudioManagerInputDevice device)
 }
 
 static const gchar *
+record_device_profile(AudioManagerInputDevice device)
+{
+    switch (device) {
+    case AUDIO_MANAGER_INPUT_BUILTIN_MIC:
+        return "Handset";
+    case AUDIO_MANAGER_INPUT_HEADSET_MIC:
+        return "Headset";
+    case AUDIO_MANAGER_INPUT_USB:
+        return "USB";
+    default:
+        return NULL;
+    }
+}
+
+static const gchar *
 find_record_gain(MtkSpeechVolume *volume,
                  const gchar *role,
                  const gchar *profile,
-                 const gchar *fallback_profile,
+                 const gchar *device_profile,
                  gchar **matched_path)
 {
     const gchar *value;
@@ -786,35 +957,20 @@ find_record_gain(MtkSpeechVolume *volume,
 
     path = g_strdup_printf("Scene,Default,Application,%s,Profile,%s", role, profile);
     value = mtk_audio_param_get_param(volume->record_vol, path, "ul_gain");
-    if (value == NULL && fallback_profile != NULL) {
-        g_free(path);
-        path = g_strdup_printf("Scene,Default,Application,%s,Profile,%s",
-                               role, fallback_profile);
-        value = mtk_audio_param_get_param(volume->record_vol, path, "ul_gain");
+    if (value != NULL) {
+        *matched_path = path;
+        return value;
     }
-    if (value == NULL) {
-        const gchar *categories[] = {
-            "Scene", "Default", "Application", role, "Profile", profile,
-            fallback_profile,
-        };
-        const gchar *best_path = NULL;
+    g_free(path);
 
-        value = mtk_audio_param_get_best_param(volume->record_vol,
-                                                categories,
-                                                G_N_ELEMENTS(categories),
-                                                "ul_gain",
-                                                &best_path);
-        if (value != NULL && best_path != NULL) {
-            g_free(path);
-            path = g_strdup(best_path);
-        }
+    path = g_strdup_printf("%s,%s", role, device_profile);
+    value = mtk_audio_param_get_param(volume->record_vol, path, "ul_gain");
+    if (value != NULL) {
+        *matched_path = path;
+        return value;
     }
-    if (value == NULL) {
-        g_free(path);
-        return NULL;
-    }
-    *matched_path = path;
-    return value;
+    g_free(path);
+    return NULL;
 }
 
 gint
@@ -827,6 +983,7 @@ mtk_speech_volume_apply_capture_gain(MtkSpeechVolume *volume,
                                      guint channels)
 {
     const gchar *logical_profile;
+    const gchar *device_profile;
     const gchar *map_profile;
     const gchar *value;
     const gchar *role_name;
@@ -847,14 +1004,15 @@ mtk_speech_volume_apply_capture_gain(MtkSpeechVolume *volume,
         return 0;
 
     logical_profile = record_profile(device);
-    if (logical_profile == NULL)
+    device_profile = record_device_profile(device);
+    if (logical_profile == NULL || device_profile == NULL)
         return -ENOTSUP;
     map_profile = device == AUDIO_MANAGER_INPUT_BUILTIN_MIC ?
                   (builtin_gain_profile != NULL ? builtin_gain_profile : "SPK_LO") :
                   (headset_gain_profile != NULL ? headset_gain_profile : "HS");
 
     role_name = media_role_name(role);
-    value = find_record_gain(volume, role_name, logical_profile, map_profile,
+    value = find_record_gain(volume, role_name, logical_profile, device_profile,
                              &matched_path);
     if (value == NULL)
         return -ENOENT;
@@ -870,7 +1028,7 @@ mtk_speech_volume_apply_capture_gain(MtkSpeechVolume *volume,
     }
     if (ret < 0)
         goto out;
-    ret = mtk_audio_param_parse_i32_list(mtk_audio_param_get_param(volume->ul_map, map_profile, "ul_pga_gain_map"),
+    ret = mtk_audio_param_parse_i32_list(profile_param(volume->ul_map, map_profile, "ul_pga_gain_map"),
                                          &pga_map,
                                          &pga_count);
     if (ret < 0)

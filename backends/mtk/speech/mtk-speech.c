@@ -1813,3 +1813,9 @@ mtk_speech_get_band(MtkSpeech *speech)
            speech->band :
            AUDIO_MANAGER_SPEECH_BAND_UNKNOWN;
 }
+
+guint
+mtk_speech_get_network(MtkSpeech *speech)
+{
+    return speech != NULL && speech->network_valid ? speech->network : 0;
+}

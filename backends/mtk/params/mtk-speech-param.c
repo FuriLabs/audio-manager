@@ -40,6 +40,7 @@ struct MtkSpeechParamProvider {
     MtkAudioParam *general;
     MtkAudioParam *magic;
     MtkAudioParam *network;
+    gchar *network_names[16];
     guint16 parser_count;
     guint volume_index;
     gboolean bt_wideband;
@@ -81,8 +82,8 @@ append_u16(guint8 *buffer, gsize capacity, gsize *offset, guint16 value)
 
 static gint
 append_param_u16(MtkAudioParam *param,
-                 const gchar *const *categories,
-                 gsize category_count,
+                 const gchar *const *paths,
+                 gsize path_count,
                  const gchar *name,
                  guint8 *buffer,
                  gsize capacity,
@@ -95,11 +96,11 @@ append_param_u16(MtkAudioParam *param,
     gsize count = 0;
     gint ret;
 
-    value = mtk_audio_param_get_best_param(param,
-                                           categories,
-                                           category_count,
-                                           name,
-                                           &matched);
+    value = mtk_audio_param_get_first_param(param,
+                                            paths,
+                                            path_count,
+                                            name,
+                                            &matched);
     if (value == NULL) {
         g_debug("SpeechParser missing required parameter name=%s", name);
         return -ENOENT;
@@ -124,6 +125,71 @@ append_param_u16(MtkAudioParam *param,
                            count * sizeof(*data));
     g_free(data);
     return ret;
+}
+
+static gint
+parse_u16_scalar(const gchar *value, guint16 *out)
+{
+    gchar *end = NULL;
+    guint64 parsed;
+
+    if (value == NULL || out == NULL)
+        return -EINVAL;
+    errno = 0;
+    parsed = g_ascii_strtoull(value, &end, 0);
+    if (errno != 0 || end == value || *end != '\0' || parsed > G_MAXUINT16)
+        return -EINVAL;
+    *out = (guint16)parsed;
+    return 0;
+}
+
+static const gchar *
+network_name_from_path(const gchar *path)
+{
+    const gchar *comma;
+
+    if (path == NULL || *path == '\0')
+        return NULL;
+    comma = strrchr(path, ',');
+    return comma != NULL ? comma + 1 : path;
+}
+
+static gint
+init_network_map(MtkSpeechParamProvider *provider)
+{
+    const gchar *first = NULL;
+    gsize path_count;
+    gsize i;
+    guint bit;
+
+    path_count = mtk_audio_param_get_path_count(provider->network);
+    for (i = 0; i < path_count; i++) {
+        const gchar *path = mtk_audio_param_get_path(provider->network, i);
+        const gchar *name = network_name_from_path(path);
+        const gchar *value;
+        guint16 support;
+
+        if (name == NULL || *name == '\0')
+            continue;
+        value = mtk_audio_param_get_param(provider->network, path,
+                                          "speech_network_support");
+        if (parse_u16_scalar(value, &support) < 0)
+            continue;
+        if (first == NULL)
+            first = name;
+        for (bit = 0; bit < G_N_ELEMENTS(provider->network_names); bit++) {
+            if ((support & (1U << bit)) != 0 && provider->network_names[bit] == NULL)
+                provider->network_names[bit] = g_strdup(name);
+        }
+    }
+
+    if (first == NULL)
+        return -ENOENT;
+    for (bit = 0; bit < G_N_ELEMENTS(provider->network_names); bit++) {
+        if (provider->network_names[bit] == NULL)
+            provider->network_names[bit] = g_strdup(first);
+    }
+    return 0;
 }
 
 static void
@@ -152,18 +218,18 @@ build_general(MtkSpeechParamProvider *provider,
               gsize *offset)
 {
     MtkSpeechParamHeader header;
-    const gchar *categories[] = { "Common" };
+    const gchar *paths[] = { "CategoryLayer,Common", "Common", "" };
     gint ret;
 
     init_header(&header, MTK_CHECK_GENERAL_BEGIN, provider, output_device);
     ret = append_bytes(buffer, MTK_SPEECH_PARAM_SIZE, offset,
                        &header, sizeof(header));
     if (ret == 0)
-        ret = append_param_u16(provider->general, categories, G_N_ELEMENTS(categories),
+        ret = append_param_u16(provider->general, paths, G_N_ELEMENTS(paths),
                                "speech_common_para", buffer,
                                MTK_SPEECH_PARAM_SIZE, offset, FALSE);
     if (ret == 0)
-        ret = append_param_u16(provider->general, categories, G_N_ELEMENTS(categories),
+        ret = append_param_u16(provider->general, paths, G_N_ELEMENTS(paths),
                                "debug_info", buffer,
                                MTK_SPEECH_PARAM_SIZE, offset, FALSE);
     if (ret == 0)
@@ -194,15 +260,21 @@ build_dmnr(MtkSpeechParamProvider *provider,
 
     for (band = 0; band < G_N_ELEMENTS(bands); band++) {
         for (profile = 0; profile < G_N_ELEMENTS(profiles); profile++) {
-            const gchar *categories[] = { bands[band], profiles[profile] };
+            gchar *hal_path = g_strdup_printf("Band,%s,Profile,%s",
+                                              bands[band], profiles[profile]);
+            gchar *device_path = g_strdup_printf("%s,%s",
+                                                 bands[band], profiles[profile]);
+            const gchar *paths[] = { hal_path, device_path, bands[band], profiles[profile], "" };
             guint16 data_header = (guint16)(((1U << band) << 12) + profile + 1U);
 
             ret = append_u16(buffer, MTK_SPEECH_PARAM_SIZE, offset, data_header);
             if (ret == 0)
                 ret = append_param_u16(provider->dmnr,
-                                       categories, G_N_ELEMENTS(categories),
+                                       paths, G_N_ELEMENTS(paths),
                                        "dmnr_para", buffer,
                                        MTK_SPEECH_PARAM_SIZE, offset, TRUE);
+            g_free(device_path);
+            g_free(hal_path);
             if (ret < 0)
                 return ret;
         }
@@ -224,13 +296,13 @@ build_magic(MtkSpeechParamProvider *provider,
             gsize *offset)
 {
     MtkSpeechParamHeader header;
-    const gchar *categories[] = { "Common" };
+    const gchar *paths[] = { "CategoryLayer,Common", "Common", "" };
     gint ret;
 
     init_header(&header, MTK_CHECK_MAGIC_BEGIN, provider, AUDIO_MANAGER_OUTPUT_NONE);
     ret = append_bytes(buffer, MTK_SPEECH_PARAM_SIZE, offset, &header, sizeof(header));
     if (ret == 0)
-        ret = append_param_u16(provider->magic, categories, G_N_ELEMENTS(categories),
+        ret = append_param_u16(provider->magic, paths, G_N_ELEMENTS(paths),
                                "shape_rx_fir_para", buffer,
                                MTK_SPEECH_PARAM_SIZE, offset, FALSE);
     if (ret == 0)
@@ -323,23 +395,42 @@ build_speech(MtkSpeechParamProvider *provider,
         }
 
         for (band = 0; band < G_N_ELEMENTS(bands); band++) {
-            const gchar *categories[] = {
-                "Default", bands[band], profile, volume, "GSM"
+            const gchar *network_name = provider->network_names[network];
+            gchar *hal_path = g_strdup_printf("Band,%s,Profile,%s,VolIndex,%s,Network,%s",
+                                              bands[band], profile, volume, network_name);
+            gchar *device_full = g_strdup_printf("%s,%s,%s,%s",
+                                                 bands[band], profile, volume, network_name);
+            gchar *device_volume = g_strdup_printf("%s,%s,%s",
+                                                   bands[band], profile, volume);
+            gchar *device_band = g_strdup_printf("%s,%s", bands[band], profile);
+            const gchar *paths[] = {
+                hal_path, device_full, device_volume, device_band, profile, bands[band], ""
             };
             gsize n;
             guint16 header_value = speech_data_header(band, network);
 
             ret = append_u16(buffer, MTK_SPEECH_PARAM_SIZE, offset, header_value);
-            if (ret < 0)
+            if (ret < 0) {
+                g_free(device_band);
+                g_free(device_volume);
+                g_free(device_full);
+                g_free(hal_path);
                 return ret;
+            }
             for (n = 0; n < G_N_ELEMENTS(names); n++) {
                 ret = append_param_u16(provider->speech,
-                                       categories, G_N_ELEMENTS(categories),
+                                       paths, G_N_ELEMENTS(paths),
                                        names[n], buffer,
                                        MTK_SPEECH_PARAM_SIZE, offset, FALSE);
                 if (ret < 0)
-                    return ret;
+                    break;
             }
+            g_free(device_band);
+            g_free(device_volume);
+            g_free(device_full);
+            g_free(hal_path);
+            if (ret < 0)
+                return ret;
             ret = append_bytes(buffer, MTK_SPEECH_PARAM_SIZE, offset, NULL, 2);
             if (ret < 0)
                 return ret;
@@ -383,6 +474,11 @@ mtk_speech_param_provider_new(const MtkConfig *config, GError **error)
     provider->network = load_audio_param(config, "SpeechNetwork_AudioParam.xml", error);
     if (provider->network == NULL)
         goto fail;
+    if (init_network_map(provider) < 0) {
+        g_set_error(error, AUDIO_MANAGER_ERROR, AUDIO_MANAGER_ERROR_CONFIG,
+                    "MediaTek SpeechNetwork_AudioParam.xml has no usable network mapping");
+        goto fail;
+    }
 
     return provider;
 
@@ -394,6 +490,8 @@ fail:
 void
 mtk_speech_param_provider_free(MtkSpeechParamProvider *provider)
 {
+    guint i;
+
     if (provider == NULL)
         return;
     mtk_audio_param_free(provider->speech);
@@ -401,6 +499,8 @@ mtk_speech_param_provider_free(MtkSpeechParamProvider *provider)
     mtk_audio_param_free(provider->general);
     mtk_audio_param_free(provider->magic);
     mtk_audio_param_free(provider->network);
+    for (i = 0; i < G_N_ELEMENTS(provider->network_names); i++)
+        g_free(provider->network_names[i]);
     g_free(provider);
 }
 

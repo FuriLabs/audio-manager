@@ -60,6 +60,8 @@ mtk_speech_volume_free(MtkSpeechVolume *volume);
  */
 gint
 mtk_speech_volume_calculate(MtkSpeechVolume *volume,
+                            AudioManagerSpeechBand band,
+                            guint network,
                             const gchar *speech_profile,
                             const gchar *gain_profile,
                             gdouble normalized_volume,

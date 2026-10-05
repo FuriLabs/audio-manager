@@ -32,21 +32,27 @@ mtk_audio_param_get_param(MtkAudioParam *param,
                           const gchar *name);
 
 /**
- * Search ordered category paths and return the first matching parameter.
- *
- * @param param Parsed AudioParam file
- * @param categories Ordered path list
- * @param category_count Number of paths
- * @param name Parameter name
- * @param matched_path Optional return location for the selected path
- * @return Static parsed value or NULL
+ * Get a parameter from the first exact path that contains it.
  */
 const gchar *
-mtk_audio_param_get_best_param(MtkAudioParam *param,
-                               const gchar *const *categories,
-                               gsize category_count,
-                               const gchar *name,
-                               const gchar **matched_path);
+mtk_audio_param_get_first_param(MtkAudioParam *param,
+                                const gchar *const *paths,
+                                gsize path_count,
+                                const gchar *name,
+                                const gchar **matched_path);
+
+/**
+ * Return the number of paths in an AudioParam tree.
+ */
+gsize
+mtk_audio_param_get_path_count(MtkAudioParam *param);
+
+/**
+ * Return an AudioParam path by index.
+ */
+const gchar *
+mtk_audio_param_get_path(MtkAudioParam *param,
+                         gsize index);
 
 /**
  * Parse a comma separated signed 32 bit integer list.
